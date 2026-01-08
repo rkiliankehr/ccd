@@ -1,0 +1,5 @@
+# Local settings
+.claude/
+
+# OS files
+.DS_Store

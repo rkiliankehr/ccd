@@ -1,0 +1,682 @@
+#!/bin/zsh
+
+# Custom Change Directory
+#
+# Purpose: Quickly change directories on commandline by typing in the directory name without the full path.
+#          Supports keyword-based search via .ccd.keywords files in directories.
+#
+# Examples:
+#   $ ccd my_project          # search by directory name
+#   $ ccd sandbox             # search by keyword (if tagged)
+#   $ ccd foo bar             # OR search: matches foo OR bar
+#   $ ccd #api                # keyword-only search
+#   $ ccd -n                  # rebuild cache
+#   $ ccd -f my_project       # show matches without cd
+#   $ ccd -k                  # edit keywords for current directory
+#
+# Setup:
+#   1. Save this file as $HOME/bin/ccd.
+#   2. Add the following to your $HOME/.zshrc:
+#           function ccd() {
+#               source $HOME/bin/ccd "$@"
+#           }
+#   3. Reload your shell configuration.
+#   4. Create a directory cache with 'ccd -n'. A new cache file is $HOME/.ccd.
+#   5. Change directory with 'ccd my_directory'.
+#   6. From time to time regenerate your cache or run a cronjob for this.
+#
+# Keywords:
+#   Create a .ccd.keywords file in any directory with one keyword per line.
+#   Lines starting with # are comments. Keywords appear in search results
+#   prefixed with # for visual distinction.
+#
+# Cron: Add to crontab for automatic cache refresh (every 15 minutes):
+#   */15 * * * * $HOME/bin/ccd -n >/dev/null 2>&1
+
+# Detect if sourced or executed directly
+if [[ "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
+    _CCD_SOURCED=1
+else
+    _CCD_SOURCED=0
+fi
+
+CCD="$HOME/.ccd"
+CCD_IGNORE="$HOME/.ccd.ignore"
+CCD_PRUNE="$HOME/.ccd.prune"
+DIRS="$HOME"
+
+usage() {
+    cat <<EOT
+Usage: ccd [OPTION] [TERM ...]
+
+Quick directory navigation by name or keyword.
+
+Options:
+  -n    Rebuild the directory cache
+  -k    Edit keywords for current directory
+  -f    Find and display matches (no cd)
+  -h    Show this help
+
+Search:
+  ccd project       Jump to directory matching "project"
+  ccd api server    Jump to directory matching "api" OR "server"
+  ccd #backend      Search keywords only (not directory names)
+
+Files:
+  ~/.ccd            Cached directories (with keywords)
+  ~/.ccd.ignore     Patterns to exclude (regex)
+  ~/.ccd.prune      Workspace markers (stops descent)
+
+Keywords:
+  Create .ccd.keywords in any directory with one term per line.
+  Lines starting with # are comments. Rebuild cache after editing.
+
+EOT
+}
+
+ccd_new() {
+    if [ ! -f "$CCD_IGNORE" ]; then
+        echo "Creating default ignore file at $CCD_IGNORE"
+        cat > "$CCD_IGNORE" <<'IGNORE'
+# Hidden directories
+/\.
+
+# macOS
+# macOS Library (adjust username as needed)
+# ^/Users/username/Library
+Microsoft User Data
+Album Artwork
+iPhoto Library
+\.Trash
+
+# Node.js / Bun / Deno
+node_modules
+\.npm
+\.yarn
+\.pnpm-store
+\.bun
+\.deno
+
+# Python
+__pycache__
+\.venv
+venv/lib
+\.eggs
+\.egg-info
+\.tox
+\.nox
+\.mypy_cache
+\.pytest_cache
+\.ruff_cache
+site-packages
+
+# Rust
+target/debug
+target/release
+\.cargo/registry
+\.cargo/git
+\.rustup
+
+# Go
+/go/pkg
+/go/bin
+
+# Java / Kotlin / Gradle / Maven
+\.gradle
+\.m2/repository
+build/classes
+build/libs
+build/tmp
+target/classes
+
+# .NET / C#
+bin/Debug
+bin/Release
+obj/Debug
+obj/Release
+\.nuget
+packages/
+
+# Ruby
+\.bundle
+vendor/bundle
+vendor/cache
+
+# PHP
+vendor/composer
+
+# iOS / Swift
+DerivedData
+\.build
+Pods
+
+# Android
+\.android
+\.gradle
+
+# Elixir
+_build
+deps
+\.elixir_ls
+
+# Haskell
+\.stack-work
+dist-newstyle
+
+# IDE / Editor
+\.idea
+\.vscode/extensions
+\.vs
+
+# Build / Dist common
+dist/
+build/
+out/
+coverage/
+\.cache
+\.parcel-cache
+\.next
+\.nuxt
+\.output
+\.turbo
+
+# Misc
+\.terraform
+\.vagrant
+\.docker
+IGNORE
+    fi
+
+    if [ ! -f "$CCD_PRUNE" ]; then
+        echo "Creating default prune markers at $CCD_PRUNE"
+        cat > "$CCD_PRUNE" <<'PRUNE'
+# Workspace markers - if a directory contains any of these,
+# it's considered a workspace root and we don't descend further.
+# Use exact directory/file names (not regexes).
+
+# Version control
+.git
+.svn
+.hg
+
+# Node.js / Bun / Deno
+node_modules
+package.json
+
+# Python
+.venv
+venv
+pyproject.toml
+setup.py
+
+# Rust
+Cargo.toml
+
+# Go
+go.mod
+
+# Java / Gradle / Maven
+pom.xml
+build.gradle
+build.gradle.kts
+
+# .NET / C#
+*.sln
+*.csproj
+
+# Ruby
+Gemfile
+
+# PHP
+composer.json
+
+# Elixir
+mix.exs
+
+# iOS / Swift
+Package.swift
+*.xcodeproj
+*.xcworkspace
+
+# Terraform
+.terraform
+
+# Docker
+docker-compose.yml
+docker-compose.yaml
+Dockerfile
+
+# CI/CD
+azure-pipelines.yml
+azure-pipelines.yaml
+Jenkinsfile
+.gitlab-ci.yml
+.travis.yml
+bitbucket-pipelines.yml
+cloudbuild.yaml
+appveyor.yml
+
+# Build systems
+Makefile
+CMakeLists.txt
+meson.build
+BUILD.bazel
+WORKSPACE
+SConstruct
+Taskfile.yml
+justfile
+
+# Monorepo tools
+lerna.json
+nx.json
+turbo.json
+pnpm-workspace.yaml
+
+# C/C++
+*.vcxproj
+configure.ac
+Makefile.am
+
+# Scala / Kotlin
+build.sbt
+*.kts
+
+# Dart / Flutter
+pubspec.yaml
+
+# Clojure
+project.clj
+deps.edn
+
+# Erlang
+rebar.config
+
+# Haskell
+*.cabal
+cabal.project
+stack.yaml
+
+# Zig
+build.zig
+
+# Nim
+*.nimble
+
+# V
+v.mod
+
+# Julia
+Project.toml
+
+# R
+DESCRIPTION
+NAMESPACE
+
+# Lua
+*.rockspec
+
+# Perl
+Makefile.PL
+cpanfile
+
+# OCaml
+dune-project
+
+# F#
+*.fsproj
+
+# Nix
+flake.nix
+default.nix
+shell.nix
+PRUNE
+    fi
+
+    (
+        cd "$HOME" || return
+
+        # Directories to exclude from traversal
+        exclude_dirs=(
+            ".git" ".venv" ".npm" ".yarn" ".pnpm-store" ".bun" ".cargo"
+            ".rustup" ".gradle" ".m2" ".nuget" ".terraform" ".cache" ".local"
+            ".vscode" ".idea" ".vs" ".eclipse" ".settings"
+            "node_modules" "__pycache__" "venv" "site-packages" "target"
+            "build" "dist" "out" "vendor" "Pods" "DerivedData" "Library"
+        )
+
+        # Build marker names list from prune file
+        marker_names=""
+        while IFS= read -r marker; do
+            [[ "$marker" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${marker// }" ]] && continue
+            [[ "$marker" == *'*'* ]] && continue  # Skip globs
+            [ -n "$marker_names" ] && marker_names="$marker_names|"
+            marker_names="$marker_names$marker"
+        done < "$CCD_PRUNE"
+
+        # Use fd if available (21x faster), otherwise fall back to find
+        if command -v fd >/dev/null 2>&1; then
+            echo "Scanning with fd (fast mode)..." >&2
+
+            # Build fd exclude args for directory listing
+            fd_excludes=""
+            for pat in "${exclude_dirs[@]}"; do
+                fd_excludes="$fd_excludes --exclude $pat"
+            done
+
+            # For marker search, don't exclude workspace markers themselves (.git, node_modules, etc.)
+            # Only exclude heavy dirs that aren't workspace markers
+            fd_marker_excludes=""
+            marker_dirs=(".git" "node_modules" ".venv" "venv")
+            for pat in "${exclude_dirs[@]}"; do
+                is_marker=false
+                for m in "${marker_dirs[@]}"; do
+                    [[ "$pat" == "$m" ]] && is_marker=true && break
+                done
+                $is_marker || fd_marker_excludes="$fd_marker_excludes --exclude $pat"
+            done
+
+            # Get directories and marker files/dirs in parallel
+            all_dirs=$(mktemp)
+            all_markers=$(mktemp)
+
+            # Note: fd outputs paths with trailing /, we strip them for consistency
+            { echo "$DIRS"; eval "fd --type d --hidden --no-ignore $fd_excludes . \"$DIRS\"" | sed 's|/$||'; } > "$all_dirs" 2>/dev/null &
+            pid_dirs=$!
+
+            # Build fd pattern for markers (search BOTH files and dirs since .git is a directory)
+            marker_pattern=$(echo "$marker_names" | sed 's/|/\n/g' | sed 's/^/^/; s/$/$/' | paste -sd'|' -)
+            eval "fd --hidden --no-ignore $fd_marker_excludes \"$marker_pattern\" \"$DIRS\"" > "$all_markers" 2>/dev/null &
+            pid_markers=$!
+
+            wait $pid_dirs $pid_markers
+
+            echo "Found $(wc -l < "$all_dirs" | tr -d ' ') directories" >&2
+
+            # Extract workspace roots from marker paths (strip trailing / first)
+            workspace_roots=$(mktemp)
+            sed 's|/$||' "$all_markers" | sed 's|/[^/]*$||' | sort -u > "$workspace_roots"
+            echo "Found $(wc -l < "$workspace_roots" | tr -d ' ') workspace roots" >&2
+
+            # Filter: exclude descendants of workspace roots
+            awk -v roots_file="$workspace_roots" '
+            BEGIN {
+                while ((getline root < roots_file) > 0) roots[root] = 1
+            }
+            {
+                path = $0
+                dominated = 0
+                for (root in roots) {
+                    if (path != root && index(path, root "/") == 1) {
+                        dominated = 1
+                        break
+                    }
+                }
+                if (!dominated) print path
+            }
+            ' "$all_dirs" | \
+                awk '{ printf "%4d:%s\n", length($0), $0 }' | \
+                sort -n | \
+                cut -d ':' -f 2 > "$CCD.$$"
+
+            rm "$all_dirs" "$all_markers" "$workspace_roots"
+
+        else
+            echo "Scanning with find (fd not installed, consider: brew install fd)..." >&2
+
+            # Build find's prune expression
+            prune_expr=""
+            for pat in "${exclude_dirs[@]}"; do
+                [ -n "$prune_expr" ] && prune_expr="$prune_expr -o "
+                prune_expr="$prune_expr-name \"$pat\""
+            done
+
+            # Build marker expression for find
+            marker_expr=""
+            while IFS= read -r marker; do
+                [[ "$marker" =~ ^[[:space:]]*# ]] && continue
+                [[ -z "${marker// }" ]] && continue
+                [[ "$marker" == *'*'* ]] && continue
+                [ -n "$marker_expr" ] && marker_expr="$marker_expr -o "
+                marker_expr="$marker_expr-name \"$marker\""
+            done < "$CCD_PRUNE"
+
+            # Single find pass with awk processing
+            eval "find \"$DIRS\" \\( $prune_expr \\) -prune -o \\( -type d -o \\( $marker_expr \\) \\) -print" 2>/dev/null | \
+                awk -v marker_pattern="$marker_names" '
+                BEGIN {
+                    n = split(marker_pattern, arr, "|")
+                    for (i = 1; i <= n; i++) markers[arr[i]] = 1
+                }
+                {
+                    path = $0
+                    n = split(path, parts, "/")
+                    filename = parts[n]
+                    if (filename in markers) {
+                        sub("/[^/]*$", "", path)
+                        if (path != "") roots[path] = 1
+                    } else {
+                        dirs[NR] = $0
+                    }
+                }
+                END {
+                    root_count = 0
+                    for (r in roots) root_count++
+                    print "Found " root_count " workspace roots" > "/dev/stderr"
+                    for (i in dirs) {
+                        path = dirs[i]
+                        dominated = 0
+                        for (root in roots) {
+                            if (path != root && index(path, root "/") == 1) {
+                                dominated = 1
+                                break
+                            }
+                        }
+                        if (!dominated) print path
+                    }
+                }
+                ' | \
+                awk '{ printf "%4d:%s\n", length($0), $0 }' | \
+                sort -n | \
+                cut -d ':' -f 2 > "$CCD.$$"
+        fi
+
+        mv "$CCD.$$" "$CCD"
+        echo "Final cache:" >&2
+        wc "$CCD"
+    )
+
+    # Append keywords from .ccd.keywords files
+    ccd_append_keywords
+}
+
+# Append keywords from .ccd.keywords files to cache entries
+ccd_append_keywords() {
+    local keywords_count=0
+    local dirs_with_keywords=0
+    local cache_tmp="$CCD.keywords.$$"
+
+    # Process each directory in cache
+    while IFS= read -r dir_path; do
+        local keywords_file="$dir_path/.ccd.keywords"
+        if [ -f "$keywords_file" ]; then
+            # Parse keywords: non-empty, non-comment lines, lowercase
+            local keywords=""
+            while IFS= read -r line || [ -n "$line" ]; do
+                # Skip comments and empty lines
+                [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                [[ -z "${line// }" ]] && continue
+                # Trim whitespace and convert to lowercase
+                local kw=$(echo "$line" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                # Validate: warn about special characters
+                if [[ "$kw" =~ [^a-z0-9_-] ]]; then
+                    echo "Warning: keyword '$kw' in $keywords_file contains special characters" >&2
+                fi
+                [ -n "$kw" ] && keywords="$keywords #$kw"
+                ((keywords_count++))
+            done < "$keywords_file"
+            if [ -n "$keywords" ]; then
+                echo "${dir_path}${keywords}"
+                ((dirs_with_keywords++))
+            else
+                echo "$dir_path"
+            fi
+        else
+            echo "$dir_path"
+        fi
+    done < "$CCD" > "$cache_tmp"
+
+    mv "$cache_tmp" "$CCD"
+
+    if [ "$dirs_with_keywords" -gt 0 ]; then
+        echo "Added $keywords_count keywords from $dirs_with_keywords directories" >&2
+    fi
+}
+
+# Edit keywords for current directory
+ccd_edit_keywords() {
+    local keywords_file="$PWD/.ccd.keywords"
+    local editor="${EDITOR:-${VISUAL:-vim}}"
+
+    # Create template if file doesn't exist
+    if [ ! -f "$keywords_file" ]; then
+        cat > "$keywords_file" <<'TEMPLATE'
+# CCD Keywords for this directory
+# Add one keyword per line (no # prefix needed)
+# These keywords will be searchable via ccd
+#
+# Example:
+#   sandbox
+#   experiments
+#   api-testing
+#
+# Run 'ccd -n' after editing to rebuild the cache.
+
+TEMPLATE
+        echo "Created $keywords_file"
+    fi
+
+    # Open in editor
+    "$editor" "$keywords_file"
+}
+
+# Escape regex special characters in a string
+ccd_escape_regex() {
+    printf '%s' "$1" | sed 's/[.[\*^$()+?{|\\]/\\&/g'
+}
+
+# Search cache with support for:
+# - Single term: matches path (leaf) OR keywords
+# - Multiple terms: OR logic (any term matches)
+# - Keyword-only: patterns starting with # search keywords only
+ccd_find() {
+    local cache_age
+
+    cache_age=$(find "$CCD" -mtime +5d 2>/dev/null | wc -l)
+    if [ "$cache_age" = "1" ]; then
+        echo "CCD cache is older than 5 days." >&2
+        echo "Consider running 'ccd -n'." >&2
+    fi
+
+    if [ $# -eq 0 ]; then
+        return 1
+    fi
+
+    # Build search patterns for each term
+    local results=""
+    local temp_results=$(mktemp)
+
+    for pattern in "$@"; do
+        # Escape regex special characters
+        local escaped=$(ccd_escape_regex "$pattern")
+
+        if [[ "$pattern" == \#* ]]; then
+            # Keyword-only search: #foo matches only in keyword portion
+            # Strip the # prefix for matching
+            local kw_pattern=$(ccd_escape_regex "${pattern#\#}")
+            grep -i "#[^#]*${kw_pattern}" "$CCD"
+        else
+            # Unified search: match path leaf OR keywords
+            # Path match: pattern anywhere in leaf directory name
+            # Keyword match: pattern anywhere in keyword
+            grep -i -E "(^[^#]*/[^/#]*${escaped}[^/#]*([ ]|$)|#[^ ]*${escaped})" "$CCD"
+        fi
+    done | awk '!seen[$0]++' > "$temp_results"
+
+    cat "$temp_results"
+    rm "$temp_results"
+}
+
+# Strip keywords from a cache line, returning only the path
+ccd_strip_keywords() {
+    echo "$1" | sed 's/ #.*$//'
+}
+
+# Colorize keywords for fzf display (dim cyan for hashtags)
+ccd_colorize() {
+    sed 's/ #\([^ ]*\)/ \x1b[36m#\1\x1b[0m/g'
+}
+
+# Main argument processing
+case "$1" in
+    -n)
+        ccd_new
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+    -k)
+        ccd_edit_keywords
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+    -f)
+        shift
+        if [ $# -eq 0 ]; then
+            echo "Error: -f requires a pattern argument"
+            usage
+            [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        fi
+        ccd_find "$@"
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+    -h|--help)
+        usage
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+    "")
+        usage
+        [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        ;;
+    *)
+        # Collect all patterns (supports multi-term OR search)
+        patterns=("$@")
+
+        if [ ${#patterns[@]} -eq 0 ]; then
+            usage
+            [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        fi
+
+        matches=$(ccd_find "${patterns[@]}")
+        match_count=$(echo "$matches" | grep -c .)
+
+        if [ "$match_count" -eq 0 ] || [ -z "$matches" ]; then
+            echo "No match found for '${patterns[*]}'."
+            [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        elif [ "$match_count" -eq 1 ]; then
+            hit="$matches"
+        elif command -v fzf >/dev/null 2>&1; then
+            hit=$(echo "$matches" | ccd_colorize | fzf --ansi --no-sort --height=40% --reverse --prompt="ccd> ")
+            if [ -z "$hit" ]; then
+                # user cancelled fzf
+                [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+            fi
+        else
+            hit=$(echo "$matches" | head -1)
+            echo "(${match_count} matches, showing first. Install fzf for interactive selection)"
+        fi
+
+        # Strip keywords from selection, keep only the path
+        hit=$(ccd_strip_keywords "$hit")
+
+        cd "$hit" || echo "Error: Cannot change to directory '$hit'"
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+esac
