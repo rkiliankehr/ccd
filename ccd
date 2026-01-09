@@ -536,7 +536,8 @@ ccd_append_keywords() {
 # Edit keywords for current directory
 ccd_edit_keywords() {
     local keywords_file="$PWD/.ccd.keywords"
-    local editor="${EDITOR:-${VISUAL:-vim}}"
+    # Use zsh word splitting to handle editors with arguments (e.g., "zed --wait")
+    local editor_cmd=(${=EDITOR:-${VISUAL:-vim}})
 
     # Create template if file doesn't exist
     if [ ! -f "$keywords_file" ]; then
@@ -557,7 +558,7 @@ TEMPLATE
     fi
 
     # Open in editor
-    "$editor" "$keywords_file"
+    "${editor_cmd[@]}" "$keywords_file"
 }
 
 # Escape regex special characters in a string
