@@ -1,6 +1,5 @@
 # Keywords for ccd-ng project
 navigation
 shell
-zsh
-workspace
-directory-jumping
+directory
+jumping
