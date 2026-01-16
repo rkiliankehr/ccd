@@ -613,9 +613,11 @@ ccd_strip_keywords() {
     echo "$1" | sed 's/ #.*$//'
 }
 
-# Colorize keywords for fzf display (dim cyan for hashtags)
+# Colorize for fzf display: directories cyan, keywords orange, $HOME -> ~
 ccd_colorize() {
-    sed 's/ #\([^ ]*\)/ \x1b[36m#\1\x1b[0m/g'
+    sed -e "s|^$HOME|~|" \
+        -e 's/^\([^ ]*\)/\x1b[36m\1\x1b[0m/' \
+        -e 's/ #\([^ ]*\)/ \x1b[38;5;208m#\1\x1b[0m/g'
 }
 
 # Main argument processing
@@ -643,8 +645,21 @@ case "$1" in
         [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
         ;;
     "")
-        usage
-        [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        # No arguments: show all directories in fzf
+        # Tab-separate path from keywords so we can show only path but search both
+        if command -v fzf >/dev/null 2>&1; then
+            hit=$(sed "s|^$HOME|~|; s/ #/\t#/" "$CCD" | fzf --ansi --exact --no-sort --height=40% --reverse --query='' --prompt="ccd> " \
+                --color='hl:yellow:bold,hl+:yellow:bold:reverse' \
+                --delimiter=$'\t' --with-nth=1)
+            if [ -n "$hit" ]; then
+                hit=$(echo "$hit" | sed "s|^~|$HOME|; s/\t.*//")
+                cd "$hit" || echo "Error: Cannot change to directory '$hit'"
+            fi
+            [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        else
+            echo "Install fzf for interactive directory selection"
+            [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+        fi
         ;;
     *)
         # Collect all patterns (supports multi-term OR search)
@@ -664,7 +679,7 @@ case "$1" in
         elif [ "$match_count" -eq 1 ]; then
             hit="$matches"
         elif command -v fzf >/dev/null 2>&1; then
-            hit=$(echo "$matches" | ccd_colorize | fzf --ansi --no-sort --height=40% --reverse --prompt="ccd> ")
+            hit=$(echo "$matches" | ccd_colorize | fzf --ansi --exact --no-sort --height=40% --reverse --prompt="ccd> " --color='hl:yellow:bold,hl+:yellow:bold:reverse')
             if [ -z "$hit" ]; then
                 # user cancelled fzf
                 [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
