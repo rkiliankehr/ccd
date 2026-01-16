@@ -508,10 +508,6 @@ ccd_append_keywords() {
                 [[ -z "${line// }" ]] && continue
                 # Trim whitespace and convert to lowercase
                 local kw=$(echo "$line" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                # Validate: warn about special characters
-                if [[ "$kw" =~ [^a-z0-9_-] ]]; then
-                    echo "Warning: keyword '$kw' in $keywords_file contains special characters" >&2
-                fi
                 [ -n "$kw" ] && keywords="$keywords #$kw"
                 ((keywords_count++))
             done < "$keywords_file"
@@ -613,6 +609,11 @@ ccd_strip_keywords() {
     echo "$1" | sed 's/ #.*$//'
 }
 
+# Strip ANSI color codes from a string
+ccd_strip_ansi() {
+    echo "$1" | sed $'s/\x1b\\[[0-9;]*m//g'
+}
+
 # Colorize for fzf display: directories cyan, keywords orange, $HOME -> ~
 ccd_colorize() {
     sed -e "s|^$HOME|~|" \
@@ -648,11 +649,12 @@ case "$1" in
         # No arguments: show all directories in fzf
         # Tab-separate path from keywords so we can show only path but search both
         if command -v fzf >/dev/null 2>&1; then
-            hit=$(sed "s|^$HOME|~|; s/ #/\t#/" "$CCD" | fzf --ansi --exact --no-sort --height=40% --reverse --query='' --prompt="ccd> " \
-                --color='hl:yellow:bold,hl+:yellow:bold:reverse' \
-                --delimiter=$'\t' --with-nth=1)
+            hit=$(ccd_colorize < "$CCD" | fzf --ansi --exact --no-sort --height=40% --reverse --query='' --prompt="ccd> " \
+                --color='hl:yellow:bold,hl+:yellow:bold:reverse')
             if [ -n "$hit" ]; then
-                hit=$(echo "$hit" | sed "s|^~|$HOME|; s/\t.*//")
+                hit=$(ccd_strip_ansi "$hit")
+                hit=$(ccd_strip_keywords "$hit")
+                hit=$(echo "$hit" | sed "s|^~|$HOME|")
                 cd "$hit" || echo "Error: Cannot change to directory '$hit'"
             fi
             [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
@@ -689,8 +691,10 @@ case "$1" in
             echo "(${match_count} matches, showing first. Install fzf for interactive selection)"
         fi
 
-        # Strip keywords from selection, keep only the path
+        # Strip ANSI codes, keywords, and restore $HOME from ~
+        hit=$(ccd_strip_ansi "$hit")
         hit=$(ccd_strip_keywords "$hit")
+        hit=$(echo "$hit" | sed "s|^~|$HOME|")
 
         cd "$hit" || echo "Error: Cannot change to directory '$hit'"
         [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
