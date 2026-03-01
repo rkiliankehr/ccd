@@ -69,12 +69,14 @@ Options:
   -n    Rebuild the directory cache
   -k    Edit keywords for current directory
   -f    Find and display matches (no cd)
+  -s    Select directory and set \$CDIR (no cd)
   -h    Show this help
 
 Search:
   ccd project       Jump to directory matching "project"
   ccd api server    Jump to directory matching "api" OR "server"
   ccd #backend      Search keywords only (not directory names)
+  ccd -s project    Select "project" dir, set \$CDIR (then: cp file \$CDIR)
 
 Files:
   ~/.ccd            Cached directories (with keywords)
@@ -364,7 +366,7 @@ DIRSFILE
         exclude_dirs=(
             ".git" ".venv" ".npm" ".yarn" ".pnpm-store" ".bun" ".cargo"
             ".rustup" ".gradle" ".m2" ".nuget" ".terraform" ".cache" ".local"
-            ".vscode" ".idea" ".vs" ".eclipse" ".settings"
+            ".vscode" ".idea" ".vs" ".eclipse" ".settings" ".claude"
             "node_modules" "__pycache__" "venv" "site-packages" "target"
             "build" "dist" "out" "vendor" "Pods" "DerivedData" "Library"
         )
@@ -664,6 +666,41 @@ case "$1" in
             [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
         fi
         ccd_find "$@"
+        [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
+        ;;
+    -s)
+        shift
+        if [ $# -eq 0 ]; then
+            # No arguments: browse all in fzf
+            if command -v fzf >/dev/null 2>&1; then
+                hit=$(ccd_colorize < "$CCD" | fzf --ansi --exact --no-sort --height=40% --reverse --query='' --prompt="ccd -s> " \
+                    --color='hl:yellow:bold,hl+:yellow:bold:reverse')
+            else
+                echo "Install fzf for interactive directory selection"
+                [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+            fi
+        else
+            matches=$(ccd_find "$@")
+            match_count=$(echo "$matches" | grep -c .)
+            if [ "$match_count" -eq 0 ] || [ -z "$matches" ]; then
+                echo "No match found for '$*'."
+                [[ $_CCD_SOURCED -eq 1 ]] && return 1 || exit 1
+            elif [ "$match_count" -eq 1 ]; then
+                hit="$matches"
+            elif command -v fzf >/dev/null 2>&1; then
+                hit=$(echo "$matches" | ccd_colorize | fzf --ansi --exact --no-sort --height=40% --reverse --prompt="ccd -s> " --color='hl:yellow:bold,hl+:yellow:bold:reverse')
+            else
+                hit=$(echo "$matches" | head -1)
+                echo "(${match_count} matches, showing first. Install fzf for interactive selection)"
+            fi
+        fi
+        if [ -n "$hit" ]; then
+            hit=$(ccd_strip_ansi "$hit")
+            hit=$(ccd_strip_keywords "$hit")
+            hit=$(echo "$hit" | sed "s|^~|$HOME|")
+            export CDIR="$hit"
+            echo "CDIR=$CDIR"
+        fi
         [[ $_CCD_SOURCED -eq 1 ]] && return 0 || exit 0
         ;;
     -h|--help)
