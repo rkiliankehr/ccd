@@ -43,7 +43,21 @@ fi
 CCD="$HOME/.ccd"
 CCD_IGNORE="$HOME/.ccd.ignore"
 CCD_PRUNE="$HOME/.ccd.prune"
-DIRS="$HOME"
+CCD_DIRS="$HOME/.ccd.dirs"
+
+# Load search directories from config, default to $HOME
+ccd_dirs=()
+if [ -f "$CCD_DIRS" ]; then
+    while IFS= read -r _line; do
+        [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_line// }" ]] && continue
+        _line="${_line%% #*}"  # strip inline comments
+        _line="${_line## }"    # trim leading
+        _line="${_line%% }"    # trim trailing
+        [ -d "$_line" ] && ccd_dirs+=("$_line")
+    done < "$CCD_DIRS"
+fi
+[ ${#ccd_dirs[@]} -eq 0 ] && ccd_dirs=("$HOME")
 
 usage() {
     cat <<EOT
@@ -64,6 +78,7 @@ Search:
 
 Files:
   ~/.ccd            Cached directories (with keywords)
+  ~/.ccd.dirs       Base directories to scan (one per line; default: \$HOME)
   ~/.ccd.ignore     Patterns to exclude (regex)
   ~/.ccd.prune      Workspace markers (stops descent)
 
@@ -332,9 +347,19 @@ shell.nix
 PRUNE
     fi
 
-    (
-        cd "$HOME" || return
+    # Create default dirs file if missing
+    if [ ! -f "$CCD_DIRS" ]; then
+        echo "Creating default search directories at $CCD_DIRS"
+        cat > "$CCD_DIRS" <<'DIRSFILE'
+# Base directories for ccd to scan (one per line).
+# Lines starting with # are comments. Only existing directories are used.
+# If this file is missing or empty, $HOME is used as default.
 
+DIRSFILE
+        echo "$HOME" >> "$CCD_DIRS"
+    fi
+
+    (
         # Directories to exclude from traversal
         exclude_dirs=(
             ".git" ".venv" ".npm" ".yarn" ".pnpm-store" ".bun" ".cargo"
@@ -381,12 +406,12 @@ PRUNE
             all_markers=$(mktemp)
 
             # Note: fd outputs paths with trailing /, we strip them for consistency
-            { echo "$DIRS"; eval "fd --type d --hidden --no-ignore $fd_excludes . \"$DIRS\"" | sed 's|/$||'; } > "$all_dirs" 2>/dev/null &
+            { printf '%s\n' "${ccd_dirs[@]}"; eval "fd --type d --hidden --no-ignore $fd_excludes . $(printf '"%s" ' "${ccd_dirs[@]}")" | sed 's|/$||'; } > "$all_dirs" 2>/dev/null &
             pid_dirs=$!
 
             # Build fd pattern for markers (search BOTH files and dirs since .git is a directory)
             marker_pattern=$(echo "$marker_names" | sed 's/|/\n/g' | sed 's/^/^/; s/$/$/' | paste -sd'|' -)
-            eval "fd --hidden --no-ignore $fd_marker_excludes \"$marker_pattern\" \"$DIRS\"" > "$all_markers" 2>/dev/null &
+            eval "fd --hidden --no-ignore $fd_marker_excludes \"$marker_pattern\" $(printf '"%s" ' "${ccd_dirs[@]}")" > "$all_markers" 2>/dev/null &
             pid_markers=$!
 
             wait $pid_dirs $pid_markers
@@ -442,7 +467,7 @@ PRUNE
             done < "$CCD_PRUNE"
 
             # Single find pass with awk processing
-            eval "find \"$DIRS\" \\( $prune_expr \\) -prune -o \\( -type d -o \\( $marker_expr \\) \\) -print" 2>/dev/null | \
+            eval "find $(printf '"%s" ' "${ccd_dirs[@]}") \\( $prune_expr \\) -prune -o \\( -type d -o \\( $marker_expr \\) \\) -print" 2>/dev/null | \
                 awk -v marker_pattern="$marker_names" '
                 BEGIN {
                     n = split(marker_pattern, arr, "|")
