@@ -8,7 +8,7 @@
 # Examples:
 #   $ ccd my_project          # search by directory name
 #   $ ccd sandbox             # search by keyword (if tagged)
-#   $ ccd foo bar             # OR search: matches foo OR bar
+#   $ ccd foo bar             # AND search: matches foo AND bar
 #   $ ccd #api                # keyword-only search
 #   $ ccd -n                  # rebuild cache
 #   $ ccd -f my_project       # show matches without cd
@@ -74,7 +74,7 @@ Options:
 
 Search:
   ccd project       Jump to directory matching "project"
-  ccd api server    Jump to directory matching "api" OR "server"
+  ccd api server    Jump to directory matching "api" AND "server"
   ccd #backend      Search keywords only (not directory names)
   ccd -s project    Select "project" dir, set \$CDIR (then: cp file \$CDIR)
 
@@ -591,7 +591,7 @@ ccd_escape_regex() {
 
 # Search cache with support for:
 # - Single term: matches path (leaf) OR keywords
-# - Multiple terms: OR logic (any term matches)
+# - Multiple terms: AND logic (all terms must match same line)
 # - Keyword-only: patterns starting with # search keywords only
 ccd_find() {
     local cache_age
@@ -606,29 +606,30 @@ ccd_find() {
         return 1
     fi
 
-    # Build search patterns for each term
-    local results=""
-    local temp_results=$(mktemp)
+    # Start with entire cache, then filter down with each term (AND)
+    local current="$CCD"
+    local temp_a=$(mktemp)
+    local temp_b=$(mktemp)
+
+    cat "$CCD" > "$temp_a"
 
     for pattern in "$@"; do
-        # Escape regex special characters
-        local escaped=$(ccd_escape_regex "$pattern")
-
         if [[ "$pattern" == \#* ]]; then
             # Keyword-only search: #foo matches only in keyword portion
-            # Strip the # prefix for matching
             local kw_pattern=$(ccd_escape_regex "${pattern#\#}")
-            grep -i "#[^#]*${kw_pattern}" "$CCD"
+            grep -i "#[^#]*${kw_pattern}" "$temp_a" > "$temp_b"
         else
             # Unified search: match path leaf OR keywords
-            # Path match: pattern anywhere in leaf directory name
-            # Keyword match: pattern anywhere in keyword
-            grep -i -E "(^[^#]*/[^/#]*${escaped}[^/#]*([ ]|$)|#[^ ]*${escaped})" "$CCD"
+            local escaped=$(ccd_escape_regex "$pattern")
+            grep -i -E "(^[^#]*/[^/#]*${escaped}[^/#]*([ ]|$)|#[^ ]*${escaped})" "$temp_a" > "$temp_b"
         fi
-    done | awk '!seen[$0]++' > "$temp_results"
 
-    cat "$temp_results"
-    rm "$temp_results"
+        # Swap: filtered results become input for next term
+        cp "$temp_b" "$temp_a"
+    done
+
+    cat "$temp_a"
+    rm -f "$temp_a" "$temp_b"
 }
 
 # Strip keywords from a cache line, returning only the path
@@ -726,7 +727,7 @@ case "$1" in
         fi
         ;;
     *)
-        # Collect all patterns (supports multi-term OR search)
+        # Collect all patterns (supports multi-term AND search)
         patterns=("$@")
 
         if [ ${#patterns[@]} -eq 0 ]; then
