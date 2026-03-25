@@ -44,6 +44,7 @@ CCD="$HOME/.ccd"
 CCD_IGNORE="$HOME/.ccd.ignore"
 CCD_PRUNE="$HOME/.ccd.prune"
 CCD_DIRS="$HOME/.ccd.dirs"
+CCD_EXCLUDE="$HOME/.ccd.exclude"
 
 # Load search directories from config, default to $HOME
 ccd_dirs=()
@@ -81,6 +82,7 @@ Search:
 Files:
   ~/.ccd            Cached directories (with keywords)
   ~/.ccd.dirs       Base directories to scan (one per line; default: \$HOME)
+  ~/.ccd.exclude    Absolute paths to skip during scan (no descent)
   ~/.ccd.ignore     Patterns to exclude (regex)
   ~/.ccd.prune      Workspace markers (stops descent)
 
@@ -92,6 +94,20 @@ EOT
 }
 
 ccd_new() {
+    # Reload search directories from config (may have changed since source time)
+    ccd_dirs=()
+    if [ -f "$CCD_DIRS" ]; then
+        while IFS= read -r _line; do
+            [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_line// }" ]] && continue
+            _line="${_line%% #*}"  # strip inline comments
+            _line="${_line## }"    # trim leading
+            _line="${_line%% }"    # trim trailing
+            [ -d "$_line" ] && ccd_dirs+=("$_line")
+        done < "$CCD_DIRS"
+    fi
+    [ ${#ccd_dirs[@]} -eq 0 ] && ccd_dirs=("$HOME")
+
     if [ ! -f "$CCD_IGNORE" ]; then
         echo "Creating default ignore file at $CCD_IGNORE"
         cat > "$CCD_IGNORE" <<'IGNORE'
@@ -361,8 +377,21 @@ DIRSFILE
         echo "$HOME" >> "$CCD_DIRS"
     fi
 
+    # Load path-based excludes from config
+    local path_excludes=()
+    if [ -f "$CCD_EXCLUDE" ]; then
+        while IFS= read -r _line; do
+            [[ "$_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_line// }" ]] && continue
+            _line="${_line%% #*}"
+            _line="${_line## }"
+            _line="${_line%% }"
+            [ -d "$_line" ] && path_excludes+=("$_line")
+        done < "$CCD_EXCLUDE"
+    fi
+
     (
-        # Directories to exclude from traversal
+        # Directories to exclude from traversal (by name)
         exclude_dirs=(
             ".git" ".venv" ".npm" ".yarn" ".pnpm-store" ".bun" ".cargo"
             ".rustup" ".gradle" ".m2" ".nuget" ".terraform" ".cache" ".local"
@@ -390,6 +419,15 @@ DIRSFILE
             for pat in "${exclude_dirs[@]}"; do
                 fd_excludes="$fd_excludes --exclude $pat"
             done
+            # Path-based excludes: compute relative path per scan dir
+            for excl in "${path_excludes[@]}"; do
+                for sdir in "${ccd_dirs[@]}"; do
+                    if [[ "$excl" == "$sdir"/* ]]; then
+                        rel="${excl#$sdir/}"
+                        fd_excludes="$fd_excludes --exclude $rel"
+                    fi
+                done
+            done
 
             # For marker search, don't exclude workspace markers themselves (.git, node_modules, etc.)
             # Only exclude heavy dirs that aren't workspace markers
@@ -401,6 +439,14 @@ DIRSFILE
                     [[ "$pat" == "$m" ]] && is_marker=true && break
                 done
                 $is_marker || fd_marker_excludes="$fd_marker_excludes --exclude $pat"
+            done
+            for excl in "${path_excludes[@]}"; do
+                for sdir in "${ccd_dirs[@]}"; do
+                    if [[ "$excl" == "$sdir"/* ]]; then
+                        rel="${excl#$sdir/}"
+                        fd_marker_excludes="$fd_marker_excludes --exclude $rel"
+                    fi
+                done
             done
 
             # Get directories and marker files/dirs in parallel
@@ -456,6 +502,10 @@ DIRSFILE
             for pat in "${exclude_dirs[@]}"; do
                 [ -n "$prune_expr" ] && prune_expr="$prune_expr -o "
                 prune_expr="$prune_expr-name \"$pat\""
+            done
+            for pat in "${path_excludes[@]}"; do
+                [ -n "$prune_expr" ] && prune_expr="$prune_expr -o "
+                prune_expr="$prune_expr-path \"$pat\""
             done
 
             # Build marker expression for find

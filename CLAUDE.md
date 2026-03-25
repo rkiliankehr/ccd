@@ -13,6 +13,7 @@ Single-file zsh script (`ccd`) that indexes directories under `$HOME` and lets y
 
 - `~/.ccd` — Directory cache (one path per line, keywords appended as `#tag`)
 - `~/.ccd.ignore` — Regex exclusion patterns
+- `~/.ccd.exclude` — Absolute paths to skip entirely during scan (no descent)
 - `~/.ccd.prune` — Workspace marker names (exact match, stops descent)
 - `.ccd.keywords` — Per-directory keyword file (one keyword per line)
 
